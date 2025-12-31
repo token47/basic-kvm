@@ -8,3 +8,4 @@ version = "0.1.0"
 description = "Minimal Python skeleton for basic-kvm"
 requires-python = ">=3.10"
 authors = [ { name = "Your Name" } ]
+license = { text = "GPL-2.0-only" }

@@ -67,4 +67,4 @@ See `CONTRIBUTING.md` for guidance on branches, PRs and code style.
 
 ## License
 
-MIT — see `LICENSE`
+GPL v2 — see `LICENSE`
