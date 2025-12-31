@@ -30,31 +30,14 @@ def enumerate_video_devices() -> List[Tuple[str, str]]:
     cannot be queried, the basename is used as the display name. Always
     returns a non-empty list with fallback entries.
     """
-    # Strict mode: use ioctl VIDIOC_QUERYCAP directly (avoid buggy bindings).
-    import fcntl
-    import os
-    import struct
-    import ctypes
-
-    def _ioc(dir_, type_, nr, size):
-        # Linux _IOC macro
-        IOC_NRBITS = 8
-        IOC_TYPEBITS = 8
-        IOC_SIZEBITS = 14
-        IOC_NRSHIFT = 0
-        IOC_TYPESHIFT = IOC_NRSHIFT + IOC_NRBITS
-        IOC_SIZESHIFT = IOC_TYPESHIFT + IOC_TYPEBITS
-        IOC_DIRSHIFT = IOC_SIZESHIFT + IOC_SIZEBITS
-        return (
-            (dir_ << IOC_DIRSHIFT)
-            | (type_ << IOC_TYPESHIFT)
-            | (nr << IOC_NRSHIFT)
-            | (size << IOC_SIZESHIFT)
-        )
-
-    IOC_READ = 2
-    VIDIOC_QUERYCAP = _ioc(IOC_READ, ord("V"), 0, 104)
-    V4L2_CAP_VIDEO_CAPTURE = 0x00000001
+    # Strict mode: require the `v4l2` Python bindings and use VIDIOC_QUERYCAP only.
+    try:
+        import fcntl
+        import os
+        import v4l2
+    except Exception as exc:
+        # fail early — preferred method unavailable
+        raise ImportError("v4l2 Python bindings are required for device enumeration") from exc
 
     paths = sorted(glob.glob("/dev/video*"))
     devices = []
@@ -64,17 +47,20 @@ def enumerate_video_devices() -> List[Tuple[str, str]]:
         except Exception:
             continue
         try:
-            buf = ctypes.create_string_buffer(104)
-            fcntl.ioctl(fd, VIDIOC_QUERYCAP, buf)
-            # struct v4l2_capability: 16s driver,32s card,32s bus_info,6I (6 uint32)
-            driver, card, bus, *ints = struct.unpack_from("<16s32s32s6I", buf.raw)
-            caps = ints[1] if len(ints) >= 2 else 0
-            if not (caps & V4L2_CAP_VIDEO_CAPTURE):
+            cap = v4l2.struct_v4l2_capability()
+            fcntl.ioctl(fd, v4l2.VIDIOC_QUERYCAP, cap)
+            caps = int(cap.capabilities)
+            if not (caps & v4l2.V4L2_CAP_VIDEO_CAPTURE):
+                # skip non-video-capture devices (e.g., metadata-only)
                 continue
-            name = card.split(b"\x00", 1)[0].decode(errors="ignore") if card else ""
+            # get card name (bytes) and decode
+            name = getattr(cap, "card", b"")
+            if isinstance(name, bytes):
+                name = name.split(b"\x00", 1)[0].decode(errors="ignore")
             display = f"{name} ({dev})" if name else dev
             devices.append((display, dev))
         except Exception:
+            # on ioctl failure, skip device
             continue
         finally:
             try:
@@ -272,12 +258,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--device", help="Video device index or path", default=0)
     parser.add_argument("--serial", help="Serial device path (or 'none')", default="/dev/ttyUSB0")
     parser.add_argument("--baud", help="Serial baud rate", type=int, default=9600)
-    parser.add_argument("--nogui", help="Do not start GUI; print greeting and exit", action="store_true")
+    # GUI-only application: do not offer a --nogui option
     args = parser.parse_args(argv)
 
-    if args.nogui:
-        print(greet(args.name))
-        return 0
+    # Always run GUI
 
     return build_and_run_gui(video_device=args.device, serial_device=args.serial, baud=args.baud)
 
