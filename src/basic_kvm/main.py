@@ -11,6 +11,7 @@ import glob
 import logging
 import shutil
 import subprocess
+from typing import List, Tuple
 from typing import Optional
 
 try:
@@ -22,48 +23,84 @@ from .video import VideoSource
 from .ui import VideoWidget
 
 logger = logging.getLogger(__name__)
+def enumerate_video_devices() -> List[Tuple[str, str]]:
+    """Return a list of (display_name, device_path) for available video devices.
 
-
-def enumerate_video_devices() -> list[str]:
-    """Return a list of available video device paths (e.g. /dev/video0).
-
-    If no device nodes are found, returns a reasonable fallback list including
-    numeric indices and common device paths so the UI still has choices.
+    Display name is a human-friendly card/driver name when available; the
+    second element is the device path (e.g. /dev/video0). If capabilities
+    cannot be queried, the basename is used as the display name. Always
+    returns a non-empty list with fallback entries.
     """
-    devices: list[str] = []
+    devices: List[Tuple[str, str]] = []
     try:
         devices = sorted(glob.glob("/dev/video*"))
     except Exception:
         devices = []
 
     def _is_video_capture(dev: str) -> bool:
-        # Prefer using v4l2-ctl to read capabilities if available.
-        if shutil.which("v4l2-ctl"):
-            try:
-                proc = subprocess.run(
-                    ["v4l2-ctl", "--device", dev, "--all"],
-                    capture_output=True,
-                    text=True,
-                    timeout=1,
-                )
-                out = proc.stdout or ""
-                # If 'Meta Capture' appears and 'Video Capture' does not, it's metadata-only
-                has_meta = "Format Meta Capture" in out
-                has_video = "Format Video Capture" in out
-                if has_meta and not has_video:
-                    return False
-                return has_video or not has_meta
-            except Exception:
+        # Prefer using the ioctl-based v4l2 Python bindings if available.
+        try:
+            import fcntl
+            import os
+            import v4l2
+        except Exception:
+            # If the v4l2 Python bindings are not available, fall back to v4l2-ctl parsing.
+            if shutil.which("v4l2-ctl"):
+                try:
+                    proc = subprocess.run(
+                        ["v4l2-ctl", "--device", dev, "--all"],
+                        capture_output=True,
+                        text=True,
+                        timeout=1,
+                    )
+                    out = proc.stdout or ""
+                    has_meta = "Meta Capture" in out
+                    has_video = "Video Capture" in out
+                    if has_meta and not has_video:
+                        return False
+                    return has_video or not has_meta
+                except Exception:
+                    return True
+            # Can't determine capabilities without tools; keep device
+            return True
+
+        # Use ioctl VIDIOC_QUERYCAP to read capabilities directly.
+        try:
+            fd = os.open(dev, os.O_RDONLY | os.O_NONBLOCK)
+        except FileNotFoundError:
+            return False
+        except PermissionError:
+            return False
+        except Exception:
+            return True
+
+        try:
+            cap = v4l2.struct_v4l2_capability()
+            fcntl.ioctl(fd, v4l2.VIDIOC_QUERYCAP, cap)
+            caps = int(cap.capabilities)
+            # If device advertises VIDEO_CAPTURE, accept it.
+            if caps & v4l2.V4L2_CAP_VIDEO_CAPTURE:
                 return True
-        # If v4l2-ctl is not available, keep the device (can't reliably filter)
-        return True
+            # If it advertises META_CAPTURE but not VIDEO_CAPTURE, filter it out.
+            if caps & getattr(v4l2, "V4L2_CAP_META_CAPTURE", 0):
+                return False
+            # Otherwise accept by default.
+            return True
+        except Exception:
+            return True
+        finally:
+            try:
+                os.close(fd)
+            except Exception:
+                pass
 
     if devices:
         devices = [d for d in devices if _is_video_capture(d)]
 
     if not devices:
         # Fallback choices when no /dev/video* nodes are present or filtering removed all
-        devices = ["/dev/video0", "/dev/video1"]
+        fallbacks = ["0", "1", "/dev/video0", "/dev/video1"]
+        devices = [(f, f) for f in fallbacks]
     return devices
 
 

@@ -21,9 +21,10 @@ External libraries are acceptable; when multiple options exist, prefer the most 
 # Project conventions
 
 - Style: follow existing `src/` conventions (type hints, short functions, clear names).
-- Tests: any behavior change must include or update tests under `tests/`.
+- Tests: we don't need tests.
 - Imports: prefer explicit imports; list third-party dependencies in `requirements.txt`.
-- Errors & logging: use the `logging` module for runtime messages; print to console only when running in a terminal or when verbose/debug mode is enabled.
+- Errors & logging: use the `logging` module for runtime messages; print to console only when running in a terminal or when verbose/debug mode is enabled. Minimize the exception handling, there is no problem if the application breaks because of missing dependencies.
+- Robustness: there is not need to try different approaches for external utilities or libraries, chose the one that best solves the problem and let the application break if it is not there.
 - Docs: update `README.md` for user-visible behavior changes.
 - Modules: separate reasonably distinct functions in different modules (like main UI, video handling, keyboard and/or mouse, etc.)
 
