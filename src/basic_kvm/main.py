@@ -9,8 +9,7 @@ from __future__ import annotations
 import argparse
 import glob
 import logging
-import shutil
-import subprocess
+
 from typing import List, Tuple
 from typing import Optional
 
@@ -31,76 +30,44 @@ def enumerate_video_devices() -> List[Tuple[str, str]]:
     cannot be queried, the basename is used as the display name. Always
     returns a non-empty list with fallback entries.
     """
-    devices: List[Tuple[str, str]] = []
+    # Strict mode: require the `v4l2` Python bindings and use VIDIOC_QUERYCAP only.
     try:
-        devices = sorted(glob.glob("/dev/video*"))
-    except Exception:
-        devices = []
+        import fcntl
+        import os
+        import v4l2
+    except Exception as exc:
+        # fail early — preferred method unavailable
+        raise ImportError("v4l2 Python bindings are required for device enumeration") from exc
 
-    def _is_video_capture(dev: str) -> bool:
-        # Prefer using the ioctl-based v4l2 Python bindings if available.
-        try:
-            import fcntl
-            import os
-            import v4l2
-        except Exception:
-            # If the v4l2 Python bindings are not available, fall back to v4l2-ctl parsing.
-            if shutil.which("v4l2-ctl"):
-                try:
-                    proc = subprocess.run(
-                        ["v4l2-ctl", "--device", dev, "--all"],
-                        capture_output=True,
-                        text=True,
-                        timeout=1,
-                    )
-                    out = proc.stdout or ""
-                    has_meta = "Meta Capture" in out
-                    has_video = "Video Capture" in out
-                    if has_meta and not has_video:
-                        return False
-                    return has_video or not has_meta
-                except Exception:
-                    return True
-            # Can't determine capabilities without tools; keep device
-            return True
-
-        # Use ioctl VIDIOC_QUERYCAP to read capabilities directly.
+    paths = sorted(glob.glob("/dev/video*"))
+    devices = []
+    for dev in paths:
         try:
             fd = os.open(dev, os.O_RDONLY | os.O_NONBLOCK)
-        except FileNotFoundError:
-            return False
-        except PermissionError:
-            return False
         except Exception:
-            return True
-
+            continue
         try:
             cap = v4l2.struct_v4l2_capability()
             fcntl.ioctl(fd, v4l2.VIDIOC_QUERYCAP, cap)
             caps = int(cap.capabilities)
-            # If device advertises VIDEO_CAPTURE, accept it.
-            if caps & v4l2.V4L2_CAP_VIDEO_CAPTURE:
-                return True
-            # If it advertises META_CAPTURE but not VIDEO_CAPTURE, filter it out.
-            if caps & getattr(v4l2, "V4L2_CAP_META_CAPTURE", 0):
-                return False
-            # Otherwise accept by default.
-            return True
+            if not (caps & v4l2.V4L2_CAP_VIDEO_CAPTURE):
+                # skip non-video-capture devices (e.g., metadata-only)
+                continue
+            # get card name (bytes) and decode
+            name = getattr(cap, "card", b"")
+            if isinstance(name, bytes):
+                name = name.split(b"\x00", 1)[0].decode(errors="ignore")
+            display = f"{name} ({dev})" if name else dev
+            devices.append((display, dev))
         except Exception:
-            return True
+            # on ioctl failure, skip device
+            continue
         finally:
             try:
                 os.close(fd)
             except Exception:
                 pass
 
-    if devices:
-        devices = [d for d in devices if _is_video_capture(d)]
-
-    if not devices:
-        # Fallback choices when no /dev/video* nodes are present or filtering removed all
-        fallbacks = ["0", "1", "/dev/video0", "/dev/video1"]
-        devices = [(f, f) for f in fallbacks]
     return devices
 
 
