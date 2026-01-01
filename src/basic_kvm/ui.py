@@ -1,17 +1,11 @@
-"""Tkinter UI helpers for basic-kvm.
 
-Provides a `VideoWidget` that can display frames from a `VideoSource`.
-"""
-from __future__ import annotations
+import logging
+import tkinter as tk
 
-from typing import Optional
+from .video import VideoSource, bgr_to_photoimage, enumerate_video_devices
+from .serial import SerialSender
 
-try:
-    import tkinter as tk
-except Exception:  # pragma: no cover - tkinter may not be available in CI
-    tk = None
-
-from .video import VideoSource, bgr_to_photoimage
+logger = logging.getLogger(__name__)
 
 
 class VideoWidget(tk.Frame):
@@ -21,9 +15,7 @@ class VideoWidget(tk.Frame):
     keeps a reference to the PhotoImage to avoid garbage collection.
     """
 
-    def __init__(self, master=None, source: Optional[VideoSource] = None, interval: int = 30, **kwargs):
-        if tk is None:
-            raise RuntimeError("Tkinter is required for VideoWidget")
+    def __init__(self, master=None, source=None, interval=30, **kwargs):
         super().__init__(master, **kwargs)
         self.source = source or VideoSource(0)
         self.interval = interval
@@ -93,6 +85,126 @@ class VideoWidget(tk.Frame):
         except Exception:
             pass
 
-    def last_frame_size(self) -> Optional[tuple[int, int]]:
+    def last_frame_size(self):
         """Return last captured frame size as (width, height) or None."""
         return getattr(self, "_last_frame_size", None)
+
+
+def build_and_run_gui(video_device: str | int = 0, serial_device: str = "/dev/ttyUSB0", baud: int = 9600) -> int:
+
+    root = tk.Tk()
+    root.title("basic-kvm")
+
+    sender = SerialSender(device=str(serial_device), baud=baud)
+    sender.open()
+
+    video_src = VideoSource(video_device)
+    widget = VideoWidget(root, source=video_src)
+    widget.pack(fill=tk.BOTH, expand=True)
+
+    # Top controls: device and baud selectors, and paste text
+    top = tk.Frame(root)
+    top.pack(side=tk.TOP, fill=tk.X)
+
+    tk.Label(top, text="Baud:").pack(side=tk.LEFT)
+    baud_var = tk.StringVar(value=str(baud))
+    baud_menu = tk.OptionMenu(top, baud_var, "9600", "19200", "38400", "57600", "115200")
+    baud_menu.pack(side=tk.LEFT)
+
+    tk.Label(top, text="Video:").pack(side=tk.LEFT)
+    dev_var = tk.StringVar(value=str(video_device))
+    devices = enumerate_video_devices()
+    dev_menu = tk.OptionMenu(top, dev_var, *devices)
+    dev_menu.pack(side=tk.LEFT)
+
+    tk.Label(top, text="Serial:").pack(side=tk.LEFT)
+    serial_var = tk.StringVar(value=str(serial_device))
+    serial_menu = tk.OptionMenu(top, serial_var, "/dev/ttyUSB0", "/dev/ttyUSB1", "/dev/serial/by-id/usb-CH9329", "none")
+    serial_menu.pack(side=tk.LEFT)
+
+    serial_status = tk.Label(top, text="Serial: closed")
+    serial_status.pack(side=tk.LEFT, padx=(6, 0))
+
+    # Resolution display on the right
+    res_label = tk.Label(top, text="Resolution: N/A")
+    res_label.pack(side=tk.RIGHT)
+
+    def update_serial_status():
+        nonlocal sender
+        state = "open" if getattr(sender, "_conn", None) is not None else "closed"
+        serial_status.configure(text=f"Serial: {state}")
+        open_close_btn.configure(text="Close Serial" if state == "open" else "Open Serial")
+
+    def serial_changed(*_args):
+        nonlocal sender
+        new_dev = serial_var.get()
+        if new_dev == "none":
+            sender.close()
+            sender = SerialSender(device="/dev/ttyUSB0", baud=int(baud_var.get()))
+            update_serial_status()
+            return
+        sender.close()
+        sender = SerialSender(device=new_dev, baud=int(baud_var.get()))
+        sender.open()
+        update_serial_status()
+
+    serial_var.trace("w", serial_changed)
+
+    def toggle_serial():
+        nonlocal sender
+        if getattr(sender, "_conn", None) is not None:
+            sender.close()
+        else:
+            sender.open()
+        update_serial_status()
+
+    open_close_btn = tk.Button(top, text="Open Serial", command=toggle_serial)
+    open_close_btn.pack(side=tk.LEFT)
+
+    def paste_and_send():
+        # Simple dialog for text to send
+        from tkinter import simpledialog
+        text = simpledialog.askstring("Paste text", "Text to send as keystrokes:")
+        if text:
+            sender.send_text(text)
+
+    paste_btn = tk.Button(top, text="Paste & Send", command=paste_and_send)
+    paste_btn.pack(side=tk.LEFT)
+
+    def video_changed(*_args):
+        new_dev = dev_var.get()
+        # interpret numeric device indices
+        try:
+            new_src = int(new_dev)
+        except Exception:
+            new_src = new_dev
+        try:
+            widget.set_source(VideoSource(new_src))
+        except Exception:
+            logger.exception("Failed to switch video source to %s", new_dev)
+
+    dev_var.trace("w", video_changed)
+
+    try:
+        widget.start()
+
+        def update_resolution():
+            size = widget.last_frame_size()
+            if size is None:
+                res_text = "Resolution: N/A"
+            else:
+                w, h = size
+                res_text = f"Resolution: {w}x{h}"
+            try:
+                res_label.configure(text=res_text)
+            except Exception:
+                pass
+            root.after(500, update_resolution)
+
+        root.after(500, update_resolution)
+        root.mainloop()
+    finally:
+        widget.stop()
+        sender.close()
+
+    return 0
